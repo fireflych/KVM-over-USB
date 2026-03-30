@@ -1348,7 +1348,9 @@ class AppMainWindow(MainWindow):
         # 指示器按键则更新指示器buffer
         self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         # 更新键盘buffer
-        self.update_keyboard_buffer_with_hid_code(hid_code, KeyStateEnum.RELEASE)
+        self.update_keyboard_buffer_with_hid_code(
+            hid_code, KeyStateEnum.RELEASE
+        )
         self.send_keyboard_buffer()
 
     # 键盘模拟单击按键
