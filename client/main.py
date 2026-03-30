@@ -1475,6 +1475,8 @@ class AppMainWindow(MainWindow):
             self.tr("System hook: ") + self.to_enabled_string(hook_state)
         )
         if hook_state:
+            # 启动钩子前先同步键盘指示器状态，确保 Num Lock 等状态正确
+            self.sync_keyboard_indicator_to_buffer()
             pythoncom_timer.start(5)
             self.hook_manager.HookKeyboard()
         else:
