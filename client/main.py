@@ -593,8 +593,12 @@ class AppMainWindow(MainWindow):
         self.mouse_report_interval = 20
         self.mouse_report_at_next: bool = False
         self.last_user_input_time = time.time()
-        self.mouse_jitter_idle_interval = self.config.mouse.get("jitter_idle_interval", 10)
-        self.mouse_jitter_distance = self.config.mouse.get("jitter_distance", 0.02)
+        self.mouse_jitter_idle_interval = self.config.mouse.get(
+            "jitter_idle_interval", 10
+        )
+        self.mouse_jitter_distance = self.config.mouse.get(
+            "jitter_distance", 0.02
+        )
         self.mouse_jitter_direction = 1
         self.mouse_jitter_sent = False
 
@@ -1166,9 +1170,13 @@ class AppMainWindow(MainWindow):
         self.config.mouse["jitter_enabled"] = jitter_status
         self.save_config()
         if jitter_status:
-            self.status_bar_manager.show_message(self.tr("Mouse jitter enabled"))
+            self.status_bar_manager.show_message(
+                self.tr("Mouse jitter enabled")
+            )
         else:
-            self.status_bar_manager.show_message(self.tr("Mouse jitter disabled"))
+            self.status_bar_manager.show_message(
+                self.tr("Mouse jitter disabled")
+            )
 
     def mouse_jitter_idle_time_triggered(self):
         from PySide6.QtWidgets import QInputDialog
@@ -1187,7 +1195,9 @@ class AppMainWindow(MainWindow):
             return
 
         self.mouse_jitter_idle_interval = float(value)
-        self.config.mouse["jitter_idle_interval"] = self.mouse_jitter_idle_interval
+        self.config.mouse["jitter_idle_interval"] = (
+            self.mouse_jitter_idle_interval
+        )
         self.save_config()
         self.status_bar_manager.show_message(
             self.tr("Mouse jitter idle time set to {0:.1f}s").format(
@@ -2251,7 +2261,9 @@ class AppMainWindow(MainWindow):
                 # 与配置文件合并
                 self.config.video.update(video_config)
                 self.config.controller.update(controller_config)
-                self.config.mouse.update(self.settings_dialog.get_mouse_config())
+                self.config.mouse.update(
+                    self.settings_dialog.get_mouse_config()
+                )
                 self.config.connection.update(connection_config)
 
                 # 同步鼠标抖动开关状态，兼容原菜单开关

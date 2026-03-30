@@ -144,9 +144,15 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
     # 获取鼠标配置
     def get_mouse_config(self) -> dict[str, typing.Any]:
         mc = {
-            "jitter_enabled": bool(self.check_box_mouse_jitter_enabled.isChecked()),
-            "jitter_idle_interval": float(self.spin_box_mouse_jitter_idle_time.value()),
-            "jitter_distance": float(self.spin_box_mouse_jitter_distance.value()),
+            "jitter_enabled": bool(
+                self.check_box_mouse_jitter_enabled.isChecked()
+            ),
+            "jitter_idle_interval": float(
+                self.spin_box_mouse_jitter_idle_time.value()
+            ),
+            "jitter_distance": float(
+                self.spin_box_mouse_jitter_distance.value()
+            ),
         }
         return mc
 
