@@ -600,7 +600,7 @@ class AppMainWindow(MainWindow):
             "jitter_distance", 0.02
         )
         self.mouse_jitter_direction = 1
-        self.mouse_jitter_sent = False
+        self.last_jitter_time = time.time()
 
         mouse_report_timer = self.timer.create("MOUSE_REPORT_TIMER")
         mouse_report_timer.timeout.connect(self.mouse_report_timer_triggered)
@@ -1232,7 +1232,7 @@ class AppMainWindow(MainWindow):
 
     def update_last_user_input_time(self):
         self.last_user_input_time = time.time()
-        self.mouse_jitter_sent = False
+        self.last_jitter_time = time.time()
 
     def maybe_send_mouse_jitter(self):
         if not self.status.is_enabled("mouse_jitter"):
@@ -1246,14 +1246,16 @@ class AppMainWindow(MainWindow):
 
         now = time.time()
         idle_time = now - self.last_user_input_time
+        # 空闲时间未达到初始等待时间，不发送
         if idle_time < self.mouse_jitter_idle_interval:
             return
 
-        # 每次间隔只发送一次抖动，直到下一次用户输入
-        if hasattr(self, "mouse_jitter_sent") and self.mouse_jitter_sent:
+        # 循环模式：每隔 jitter_idle_interval 秒发送一次抖动
+        time_since_last_jitter = now - self.last_jitter_time
+        if time_since_last_jitter < self.mouse_jitter_idle_interval:
             return
 
-        self.mouse_jitter_sent = True
+        self.last_jitter_time = now
         jitter_offset = self.mouse_jitter_distance * self.mouse_jitter_direction
         self.mouse_jitter_direction *= -1
 
@@ -1346,7 +1348,7 @@ class AppMainWindow(MainWindow):
         # 指示器按键则更新指示器buffer
         self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         # 更新键盘buffer
-        self.update_keyboard_buffer_with_hid_code(hid_code, KeyStateEnum.PRESS)
+        self.update_keyboard_buffer_with_hid_code(hid_code, KeyStateEnum.RELEASE)
         self.send_keyboard_buffer()
 
     # 键盘模拟单击按键
