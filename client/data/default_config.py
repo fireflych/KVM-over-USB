@@ -16,6 +16,9 @@ mouse:
   relative_click: false
   relative_speed: 0.6
   report_frequency: 60
+  jitter_enabled: false
+  jitter_idle_interval: 10
+  jitter_distance: 0.02
 paste_board:
   interval: 1
 shortcut_keys:

@@ -68,6 +68,7 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
         self.video_config: dict[str, typing.Any] = dict()
         self.controller_config: dict[str, typing.Any] = dict()
         self.connection_config: dict[str, typing.Any] = dict()
+        self.mouse_config: dict[str, typing.Any] = dict()
         self.accept_settings: bool = False
 
         # self.adjustSize()
@@ -136,6 +137,33 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
     def set_connection_config(self, config: dict[str, typing.Any]) -> None:
         self.connection_config = config
 
+    # 设置鼠标配置
+    def set_mouse_config(self, config: dict[str, typing.Any]) -> None:
+        self.mouse_config = config
+
+    # 获取鼠标配置
+    def get_mouse_config(self) -> dict[str, typing.Any]:
+        mc = {
+            "jitter_enabled": bool(self.check_box_mouse_jitter_enabled.isChecked()),
+            "jitter_idle_interval": float(self.spin_box_mouse_jitter_idle_time.value()),
+            "jitter_distance": float(self.spin_box_mouse_jitter_distance.value()),
+        }
+        return mc
+
+    # 刷新鼠标配置界面为运行时配置
+    def refresh_mouse_with_config(self) -> None:
+        if self.mouse_config is None:
+            return
+        self.check_box_mouse_jitter_enabled.setChecked(
+            bool(self.mouse_config.get("jitter_enabled", False))
+        )
+        self.spin_box_mouse_jitter_idle_time.setValue(
+            float(self.mouse_config.get("jitter_idle_interval", 10.0))
+        )
+        self.spin_box_mouse_jitter_distance.setValue(
+            float(self.mouse_config.get("jitter_distance", 0.02))
+        )
+
     # 刷新视频选择界面为运行时配置
     def refresh_video_devices_with_config(self) -> None:
         width = self.video_config["resolution_x"]
@@ -188,6 +216,7 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
     def refresh_with_config(self) -> None:
         self.refresh_video_devices_with_config()
         self.refresh_controller_devices_with_config()
+        self.refresh_mouse_with_config()
         self.refresh_connection_with_config()
 
     def auto_string(self) -> str:

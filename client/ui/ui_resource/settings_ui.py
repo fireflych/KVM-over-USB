@@ -16,7 +16,7 @@ from PySide6.QtGui import (QBrush, QColor, QConicalGradient, QCursor,
     QImage, QKeySequence, QLinearGradient, QPainter,
     QPalette, QPixmap, QRadialGradient, QTransform)
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QCheckBox, QComboBox,
-    QDialog, QDialogButtonBox, QGridLayout, QLabel,
+    QDialog, QDialogButtonBox, QDoubleSpinBox, QGridLayout, QLabel,
     QSizePolicy, QTabWidget, QVBoxLayout, QWidget)
 
 class Ui_SettingsDialog(object):
@@ -98,17 +98,42 @@ class Ui_SettingsDialog(object):
         self.gridLayout_2.addWidget(self.label_baud_rate, 2, 0, 1, 1)
 
         self.combo_box_baud_rate = QComboBox(self.tab_controller)
+        self.combo_box_baud_rate.setObjectName(u"combo_box_baud_rate")
+        self.combo_box_baud_rate.setEditable(True)
         self.combo_box_baud_rate.addItem(u"9600")
         self.combo_box_baud_rate.addItem(u"14400")
         self.combo_box_baud_rate.addItem(u"19200")
         self.combo_box_baud_rate.addItem(u"38400")
         self.combo_box_baud_rate.addItem(u"57600")
         self.combo_box_baud_rate.addItem(u"115200")
-        self.combo_box_baud_rate.setObjectName(u"combo_box_baud_rate")
-        self.combo_box_baud_rate.setEditable(True)
-        self.combo_box_baud_rate.setCurrentText(u"9600")
 
         self.gridLayout_2.addWidget(self.combo_box_baud_rate, 2, 1, 1, 1)
+
+        self.label_mouse_jitter_idle_time = QLabel(self.tab_controller)
+        self.label_mouse_jitter_idle_time.setObjectName(u"label_mouse_jitter_idle_time")
+        self.gridLayout_2.addWidget(self.label_mouse_jitter_idle_time, 3, 0, 1, 1)
+
+        self.spin_box_mouse_jitter_idle_time = QDoubleSpinBox(self.tab_controller)
+        self.spin_box_mouse_jitter_idle_time.setObjectName(u"spin_box_mouse_jitter_idle_time")
+        self.spin_box_mouse_jitter_idle_time.setDecimals(1)
+        self.spin_box_mouse_jitter_idle_time.setRange(1.0, 9999.0)
+        self.spin_box_mouse_jitter_idle_time.setSingleStep(1.0)
+        self.gridLayout_2.addWidget(self.spin_box_mouse_jitter_idle_time, 3, 1, 1, 1)
+
+        self.label_mouse_jitter_distance = QLabel(self.tab_controller)
+        self.label_mouse_jitter_distance.setObjectName(u"label_mouse_jitter_distance")
+        self.gridLayout_2.addWidget(self.label_mouse_jitter_distance, 4, 0, 1, 1)
+
+        self.spin_box_mouse_jitter_distance = QDoubleSpinBox(self.tab_controller)
+        self.spin_box_mouse_jitter_distance.setObjectName(u"spin_box_mouse_jitter_distance")
+        self.spin_box_mouse_jitter_distance.setDecimals(3)
+        self.spin_box_mouse_jitter_distance.setRange(0.001, 1.0)
+        self.spin_box_mouse_jitter_distance.setSingleStep(0.005)
+        self.gridLayout_2.addWidget(self.spin_box_mouse_jitter_distance, 4, 1, 1, 1)
+
+        self.check_box_mouse_jitter_enabled = QCheckBox(self.tab_controller)
+        self.check_box_mouse_jitter_enabled.setObjectName(u"check_box_mouse_jitter_enabled")
+        self.gridLayout_2.addWidget(self.check_box_mouse_jitter_enabled, 5, 0, 1, 2)
 
         self.tabWidget.addTab(self.tab_controller, "")
         self.tab_connection = QWidget()
@@ -155,6 +180,9 @@ class Ui_SettingsDialog(object):
         self.combo_box_com_port.setItemText(0, QCoreApplication.translate("SettingsDialog", u"auto", None))
 
         self.label_baud_rate.setText(QCoreApplication.translate("SettingsDialog", u"Baud rate:", None))
+        self.label_mouse_jitter_idle_time.setText(QCoreApplication.translate("SettingsDialog", u"Mouse jitter idle time (s):", None))
+        self.label_mouse_jitter_distance.setText(QCoreApplication.translate("SettingsDialog", u"Mouse jitter distance:", None))
+        self.check_box_mouse_jitter_enabled.setText(QCoreApplication.translate("SettingsDialog", u"Enable mouse jitter", None))
 
         self.tabWidget.setTabText(self.tabWidget.indexOf(self.tab_controller), QCoreApplication.translate("SettingsDialog", u"Controller", None))
         self.check_box_auto_connect.setText(QCoreApplication.translate("SettingsDialog", u"Auto Connect", None))
