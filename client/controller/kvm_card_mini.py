@@ -140,9 +140,9 @@ class KvmCardMiniHidBuffer:
         # 填充滚轮信息
         wheel_bit = 7
         mouse_wheel_state = buffer.wheel
-        if mouse_wheel_state == MouseWheelStateEnum.DOWN:
+        if mouse_wheel_state == MouseWheelStateEnum.UP:
             hid_buffer[wheel_bit] = 0x01
-        elif mouse_wheel_state == MouseWheelStateEnum.UP:
+        elif mouse_wheel_state == MouseWheelStateEnum.DOWN:
             hid_buffer[wheel_bit] = 0xFF
         else:
             hid_buffer[wheel_bit] = 0x00
@@ -198,9 +198,9 @@ class KvmCardMiniHidBuffer:
         # 填充滚轮信息
         wheel_bit = 5
         mouse_wheel_state = buffer.wheel
-        if mouse_wheel_state == MouseWheelStateEnum.DOWN:
+        if mouse_wheel_state == MouseWheelStateEnum.UP:
             hid_buffer[wheel_bit] = 0x01
-        elif mouse_wheel_state == MouseWheelStateEnum.UP:
+        elif mouse_wheel_state == MouseWheelStateEnum.DOWN:
             hid_buffer[wheel_bit] = 0xFF
         else:
             hid_buffer[wheel_bit] = 0x00
@@ -227,14 +227,14 @@ class ControllerKvmCardMini(ControllerDeviceBase):
         self.hid_buffer: KvmCardMiniHidBuffer = KvmCardMiniHidBuffer()
         self.relative_click: bool = False
 
-    def device_init(self, config: dict[str, typing.Any]) -> None:
-        self.relative_click: bool = config["relative_click"]
-        hid_enumerate: typing.List[typing.Dict[str : typing.Any]] = (
+    def device_init(self, buffer: dict[str, typing.Any]) -> bool:
+        self.relative_click: bool = buffer["relative_click"]
+        hid_enumerate: typing.List[typing.Dict[str, typing.Any]] = (
             hid.enumerate()
         )
         logger.debug(hid_enumerate)
         for i in range(len(hid_enumerate)):
-            hid_device_info: typing.Dict[str : typing.Any] = hid_enumerate[i]
+            hid_device_info: typing.Dict[str, typing.Any] = hid_enumerate[i]
             vid = hid_device_info["vendor_id"]
             pid = hid_device_info["product_id"]
             if vid == self.vendor_id and pid == self.product_id:
@@ -243,6 +243,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
                 logger.info(f"Found target device: {self.hid_device_path}")
                 logger.info(f"Product: {product_string}")
                 break
+        return True
 
     def device_open(self) -> bool:
         status = False
@@ -264,7 +265,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
         self.hid_device.close()
         self.is_open = False
 
-    def check_connection(self) -> bool:
+    def device_check_connection(self) -> bool:
         return self.is_open
 
     # 设备事件
@@ -325,11 +326,13 @@ class ControllerKvmCardMini(ControllerDeviceBase):
 
     def read_hid_data(self) -> tuple[int, list[int]]:
         status_code: int = 0
-        data: list[int] | None = list()
+        data: list[int] = list()
         time_start = time.perf_counter()
         while True:
             try:
                 data = self.hid_device.read(64)
+                if not isinstance(data, list):
+                    data = list()
             except ValueError:
                 logger.error("Device is not open")
                 status_code = 1
@@ -339,7 +342,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
                 logger.error("Error reading data from device")
                 status_code = 2
                 break
-            if data is not None and len(data) != 0:
+            if isinstance(data, list) and len(data) != 0:
                 if project_var.debug_mode:
                     logger.debug(f"hid > {data}")
                 break
@@ -353,7 +356,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
     def keyboard_receive_status(self) -> tuple[int, dict[str, bool]]:
         status: bool = False
         reply_dict: dict = dict()
-        if not self.check_connection():
+        if not self.device_check_connection():
             return status, reply_dict
 
         # [3,0] 是要求返回键盘状态数据
@@ -392,7 +395,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
         return status_code, reply_dict
 
     def keyboard_send_event(self, buffer: KeyboardKeyBuffer):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         keys = buffer.buffer()
         for key in keys:
@@ -410,13 +413,13 @@ class ControllerKvmCardMini(ControllerDeviceBase):
     def keyboard_recv_event(self, _command: str) -> tuple[int, dict]:
         status_code: int = 1
         reply: dict = dict()
-        if not self.check_connection():
+        if not self.device_check_connection():
             return status_code, reply
         status_code, reply = self.keyboard_receive_status()
         return status_code, reply
 
     def mouse_send_event(self, command: str, buffer: MouseStateBuffer):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         if command == "mouse_absolute_write":
             if self.relative_click and not buffer.button.is_unknown():
@@ -432,7 +435,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
         # self.hid_buffer.mouse_reset()
 
     def controller_release(self, release_type: str = "all"):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         if release_type == "mouse":
             self.hid_buffer.mouse_reset()
@@ -450,7 +453,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
             logger.debug(f"unknown release type: {release_type}")
 
     def controller_reset(self):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         status_code = self.write_hid_data([4, 0])
         if status_code != 0:
@@ -460,7 +463,7 @@ class ControllerKvmCardMini(ControllerDeviceBase):
             self.device_close()
 
     def update_board_indicator_light(self, r: int, g: int, b: int):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         self.hid_buffer.update_ws2812b(r, g, b)
         self.write_hid_data(self.hid_buffer.ws2812b_buffer)

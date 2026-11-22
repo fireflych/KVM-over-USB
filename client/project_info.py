@@ -1,5 +1,5 @@
-VERSION_STRING = "v2025.09.22"
-CONFIG_VERSION_STRING = "v6"
+VERSION_STRING = "DYNAMIC-VERSION"
+CONFIG_VERSION_STRING = "v9"
 
 if __name__ == "__main__":
     pass

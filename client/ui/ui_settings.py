@@ -68,7 +68,7 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
         self.video_config: dict[str, typing.Any] = dict()
         self.controller_config: dict[str, typing.Any] = dict()
         self.connection_config: dict[str, typing.Any] = dict()
-        self.mouse_config: dict[str, typing.Any] = dict()
+        self.ui_config: dict[str, typing.Any] = dict()
         self.accept_settings: bool = False
 
         # self.adjustSize()
@@ -137,38 +137,16 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
     def set_connection_config(self, config: dict[str, typing.Any]) -> None:
         self.connection_config = config
 
-    # 设置鼠标配置
-    def set_mouse_config(self, config: dict[str, typing.Any]) -> None:
-        self.mouse_config = config
+    # 获取连接配置
+    def get_ui_config(self) -> dict[str, typing.Any]:
+        uc: dict[str, typing.Any] = dict()
+        language_text = self.combo_box_language.currentText()
+        uc["language"] = language_text
+        return uc
 
-    # 获取鼠标配置
-    def get_mouse_config(self) -> dict[str, typing.Any]:
-        mc = {
-            "jitter_enabled": bool(
-                self.check_box_mouse_jitter_enabled.isChecked()
-            ),
-            "jitter_idle_interval": float(
-                self.spin_box_mouse_jitter_idle_time.value()
-            ),
-            "jitter_distance": float(
-                self.spin_box_mouse_jitter_distance.value()
-            ),
-        }
-        return mc
-
-    # 刷新鼠标配置界面为运行时配置
-    def refresh_mouse_with_config(self) -> None:
-        if self.mouse_config is None:
-            return
-        self.check_box_mouse_jitter_enabled.setChecked(
-            bool(self.mouse_config.get("jitter_enabled", False))
-        )
-        self.spin_box_mouse_jitter_idle_time.setValue(
-            float(self.mouse_config.get("jitter_idle_interval", 10.0))
-        )
-        self.spin_box_mouse_jitter_distance.setValue(
-            float(self.mouse_config.get("jitter_distance", 0.02))
-        )
+    # 设置连接配置
+    def set_ui_config(self, config: dict[str, typing.Any]) -> None:
+        self.ui_config = config
 
     # 刷新视频选择界面为运行时配置
     def refresh_video_devices_with_config(self) -> None:
@@ -239,16 +217,43 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
         self.combo_box_device.clear()
         video_devices = self.list_video_devices_name()
         video_device_name = None
+        # 加入空摄像头选项
+        self.combo_box_device.addItem("empty_device")
+        # 插入正常的摄像头信息
         for device in video_devices:
             self.combo_box_device.addItem(device)
             video_device_name = device
         if video_device_name is not None:
             self.combo_box_device.setCurrentText(video_device_name)
             self.refresh_video_device_info(video_device_name)
+        else:
+            self.combo_box_device.setCurrentText("empty_device")
+            self.refresh_empty_video_device_info()
+
+    # 刷新空视频设备详细信息
+    def refresh_empty_video_device_info(self):
+        resolution_list = [
+            "800x600",
+            "1280x720",
+            "1920x1080",
+            "2560x1440",
+            "3840x2160",
+        ]
+        default_format = "NONE"
+        self.combo_box_resolution.clear()
+        self.combo_box_format.clear()
+        for resolution_text in resolution_list:
+            self.combo_box_resolution.addItem(resolution_text)
+        self.combo_box_resolution.setCurrentText("1280x720")
+        self.combo_box_format.addItem(default_format)
+        self.combo_box_format.setCurrentText(default_format)
 
     # 刷新视频设备详细信息
     def refresh_video_device_info(self, device_name: str):
         if device_name == "":
+            return
+        if device_name == "empty_device":
+            self.refresh_empty_video_device_info()
             return
         self.combo_box_resolution.clear()
         self.combo_box_format.clear()

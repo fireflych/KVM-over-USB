@@ -1,9 +1,12 @@
 import threading
 import typing
 
+from PySide6.QtCore import QThread
+
 from controller.base import ControllerDeviceBase
 from controller.ch9329 import ControllerCh9329
 from controller.kvm_card_mini import ControllerKvmCardMini
+from controller.esp32s3_kvm import ControllerEsp32s3Kvm
 
 
 class ControllerGeneralDevice(ControllerDeviceBase):
@@ -11,6 +14,7 @@ class ControllerGeneralDevice(ControllerDeviceBase):
         self.controller_dict: dict[str, type[ControllerDeviceBase]] = {
             "ch9329": ControllerCh9329,
             "kvm-card-mini": ControllerKvmCardMini,
+            "esp32s3-kvm": ControllerEsp32s3Kvm,
         }
         self.controller_type: str = ""
         self.controller: ControllerDeviceBase | None = None
@@ -23,18 +27,32 @@ class ControllerGeneralDevice(ControllerDeviceBase):
             self.config: dict[str, typing.Any] = buffer
             self.controller_type = self.config["controller_type"]
             self.controller = self.controller_dict[self.controller_type]()
+            if self.controller is None:
+                raise RuntimeError("Controller is not initialized")
             # 剩余参数传递给控制器实现
             status = self.controller.device_init(buffer)
         return status
 
     def device_open(self) -> bool:
+        if self.controller is None:
+            raise RuntimeError("Controller is not initialized")
         return self.controller.device_open()
 
     def device_close(self) -> None:
+        if self.controller is None:
+            raise RuntimeError("Controller is not initialized")
         return self.controller.device_close()
 
-    def check_connection(self) -> bool:
-        return self.controller.check_connection()
+    def device_check_connection(self) -> bool:
+        if self.controller is None:
+            raise RuntimeError("Controller is not initialized")
+        return self.controller.device_check_connection()
+
+    @staticmethod
+    def device_sleep(interval: int = 1) -> None:
+        if interval > 0:
+            QThread.msleep(interval)
+        pass
 
     # 设备事件
     # 返回0为成功
@@ -42,6 +60,9 @@ class ControllerGeneralDevice(ControllerDeviceBase):
     def device_event(
         self, command: str, buffer: typing.Any
     ) -> tuple[str, int, typing.Any]:
+        if self.controller is None:
+            raise RuntimeError("Controller is not initialized")
+
         status_code: int = self.generate_status_code(True)
         reply: typing.Any = None
 
@@ -50,9 +71,12 @@ class ControllerGeneralDevice(ControllerDeviceBase):
             status_code = self.generate_status_code(status)
         elif command == "device_close":
             self.device_close()
-        elif command == "check_connection":
-            status = self.check_connection()
+        elif command == "device_check_connection":
+            status = self.device_check_connection()
             status_code = self.generate_status_code(status)
+        elif command == "device_sleep":
+            self.device_sleep(int(buffer))
+            status_code = self.generate_status_code(True)
         else:
             command, status_code, reply = self.controller.device_event(
                 command, buffer

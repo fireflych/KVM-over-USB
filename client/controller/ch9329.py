@@ -31,7 +31,6 @@ class ControllerCh9329(ControllerDeviceBase):
 
     def __init__(self):
         self.hid_code_to_key_name: dict[int, str] = HID_CODE_TO_KEY_NAME
-        self.connection: Serial | None = None
         self.port: str = "auto"
         self.baud_rate: int = 9600
         self.timeout: float = 1.0
@@ -41,35 +40,53 @@ class ControllerCh9329(ControllerDeviceBase):
         self.max_interval: float = 0.5
         self.relative_click = False
 
+        self._connection: Serial | None = None
+
+    @property
+    def connection(self) -> Serial:
+        if self._connection is None:
+            raise RuntimeError("Connection is not initialized")
+        return self._connection
+
+    @connection.setter
+    def connection(self, value):
+        if isinstance(value, Serial):
+            self._connection = value
+        else:
+            self._connection = None
+
     def random_interval(self) -> float:
         return random.uniform(self.min_interval, self.max_interval)
 
-    def device_init(self, config: dict[str, typing.Any]) -> None:
+    def device_init(self, buffer: typing.Any) -> bool:
+        config: dict[str, typing.Any] = buffer
         self.port: str = config["port"]
         self.baud_rate: int = config["baud_rate"]
         self.timeout: int = config["timeout"]
         self.screen_x: int = config["resolution_x"]
         self.screen_y: int = config["resolution_y"]
         self.relative_click: bool = config["relative_click"]
+        return True
 
     def device_open(self) -> bool:
-        status, self.connection = SerialDevice.create_serial_connection(
+        status, connection = SerialDevice.create_serial_connection(
             self.port, self.baud_rate, self.timeout
         )
-        if not status:
-            self.connection = None
+        self.connection = connection
         return status
 
     def device_close(self) -> None:
         self.ch9329_release("all")
-        SerialDevice.close_serial_connection(self.connection)
-        self.connection = None
+        if self._connection is not None:
+            SerialDevice.close_serial_connection(self._connection)
+            self._connection = None
+        pass
 
-    def check_connection(self) -> bool:
-        result: bool = False
-        if self.connection is None:
-            return result
-        result = self.connection.is_open
+    def device_check_connection(self) -> bool:
+        if isinstance(self._connection, Serial):
+            result = self.connection.is_open
+        else:
+            result = False
         return result
 
     # 设备事件
@@ -145,10 +162,10 @@ class ControllerCh9329(ControllerDeviceBase):
 
         if buffer.wheel == MouseWheelStateEnum.UP:
             # 滚轮向上
-            wheel = -1
+            wheel = 1
         elif buffer.wheel == MouseWheelStateEnum.DOWN:
             # 滚轮向下
-            wheel = 1
+            wheel = -1
         else:
             # 滚轮不动
             wheel = 0
@@ -162,6 +179,10 @@ class ControllerCh9329(ControllerDeviceBase):
             button_name = "right"
         elif buffer.button.code == MouseButtonCodeEnum.MIDDLE_BUTTON:
             button_name = "center"
+        elif buffer.button.code == MouseButtonCodeEnum.XBUTTON1_BUTTON:
+            button_name = "xbutton1"
+        elif buffer.button.code == MouseButtonCodeEnum.XBUTTON2_BUTTON:
+            button_name = "xbutton2"
         elif buffer.button.code == MouseButtonCodeEnum.UNKNOWN_BUTTON:
             button_name = "null"
         else:
@@ -197,25 +218,29 @@ class ControllerCh9329(ControllerDeviceBase):
 
         if buffer.wheel == MouseWheelStateEnum.UP:
             # 滚轮向上
-            wheel = -1
+            wheel = 1
         elif buffer.wheel == MouseWheelStateEnum.DOWN:
             # 滚轮向下
-            wheel = 1
+            wheel = -1
         else:
             # 滚轮不动
             wheel = 0
 
-        button_name = "null"
+        button_name = "none"
         if buffer.button.state == MouseButtonStateEnum.RELEASE:
-            button_name = "null"
+            button_name = "none"
         elif buffer.button.code == MouseButtonCodeEnum.LEFT_BUTTON:
             button_name = "left"
         elif buffer.button.code == MouseButtonCodeEnum.RIGHT_BUTTON:
             button_name = "right"
         elif buffer.button.code == MouseButtonCodeEnum.MIDDLE_BUTTON:
             button_name = "center"
+        elif buffer.button.code == MouseButtonCodeEnum.XBUTTON1_BUTTON:
+            button_name = "xbutton1"
+        elif buffer.button.code == MouseButtonCodeEnum.XBUTTON2_BUTTON:
+            button_name = "xbutton2"
         elif buffer.button.code == MouseButtonCodeEnum.UNKNOWN_BUTTON:
-            button_name = "null"
+            button_name = "none"
         else:
             logger.debug(f"unknown mouse button {buffer.button.code}")
         self.mouse_send_data(button_name, x, y, wheel, True)
@@ -228,7 +253,7 @@ class ControllerCh9329(ControllerDeviceBase):
         key_name: str | None = self.hid_code_to_key_name.get(code, None)
         if key_name is None:
             logger.error(f"Key name not found: {key_name}")
-            key_name = ""
+            key_name: str = ""
         return key_name
 
     def mouse_send_data(
@@ -239,7 +264,7 @@ class ControllerCh9329(ControllerDeviceBase):
         wheel: int = 0,
         relative: bool = False,
     ):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         if not relative:
             mouse.send_absolute_data(
@@ -255,7 +280,7 @@ class ControllerCh9329(ControllerDeviceBase):
             mouse.send_relative_data(self.connection, x, y, button_name, wheel)
 
     def keyboard_send_data(self, keys: list, function_keys: list):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return False
         if len(keys) > 6:
             keys = keys[0:6]
@@ -269,7 +294,7 @@ class ControllerCh9329(ControllerDeviceBase):
     def keyboard_receive_status(self) -> tuple[int, dict[str, bool]]:
         status: bool = False
         reply_dict: dict = dict()
-        if not self.check_connection():
+        if not self.device_check_connection():
             return status, reply_dict
         # clear connection buffer
         # self.connection.readall()
@@ -287,7 +312,7 @@ class ControllerCh9329(ControllerDeviceBase):
         return status_code, reply_dict
 
     def ch9329_release(self, release_type: str = "all"):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         if release_type == "mouse":
             mouse.release(self.connection)
@@ -301,7 +326,7 @@ class ControllerCh9329(ControllerDeviceBase):
 
     # 复位芯片
     def ch9329_reset(self):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         chip_command.send_command_reset(self.connection)
         self.connection.flush()
@@ -309,7 +334,7 @@ class ControllerCh9329(ControllerDeviceBase):
 
     # 恢复出厂设置
     def ch9329_restore_factory_settings(self):
-        if not self.check_connection():
+        if not self.device_check_connection():
             return
         chip_command.send_command_restore_factory_config(self.connection)
 

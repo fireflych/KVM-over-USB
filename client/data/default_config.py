@@ -1,5 +1,5 @@
 MAIN_DEFAULT_CONFIG_DATA = """
-config_version: v6
+config_version: v9
 connection:
   auto_connect: false
 controller:
@@ -33,6 +33,18 @@ shortcut_keys:
   - ctrl_left
   - shift_left
   - esc
+  Ctrl+Shift+F10:
+  - ctrl_left
+  - shift_left
+  - f10
+  Ctrl+Shift+F11:
+  - ctrl_left
+  - shift_left
+  - f11
+  Ctrl+Shift+F12:
+  - ctrl_left
+  - shift_left
+  - f12
   Meta+D:
   - win_left
   - d
@@ -43,14 +55,17 @@ shortcut_keys:
   - win_left
   - r
 ui:
+  language: auto
   quick_paste: true
   tips_fullscreen: true
   tips_system_warning: true
+  tips_empty_video_device: true
   window_auto_maximized: false
   window_auto_to_center: true
+  island_collapsed_strip: 5
 video:
-  device: Integrated Webcam
-  format: NV12
+  device: empty_device
+  format: NONE
   keep_aspect_ratio: true
   resolution_x: 1280
   resolution_y: 720

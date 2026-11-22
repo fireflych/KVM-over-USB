@@ -25,6 +25,8 @@ from PySide6.QtCore import (
     QTranslator,
     QUrl,
     Signal,
+    QLocale,
+    QCoreApplication,
 )
 from PySide6.QtGui import (
     QCloseEvent,
@@ -65,11 +67,12 @@ from loguru import logger
 import keyboard_buffer
 import project_var
 from controller.general import ControllerGeneralDevice
-from data.keyboard_key_name_to_hid_code import KEY_NAME_TO_HID_CODE
-from data.keyboard_os_key_code_to_hid_code import (
+from data.keyboard_code_converter import (
     qt_key_event_to_hid_code,
     os_scancode_code_to_hid_code,
+    key_name_to_hid_code,
 )
+from data.keyboard_key_name_to_hid_code import KEY_NAME_TO_HID_CODE
 from data.keyboard_shift_symbol import SHIFT_SYMBOL
 from keyboard_buffer import (
     KeyboardIndicatorBuffer,
@@ -89,40 +92,113 @@ from project_path import (
     project_source_directory_path,
 )
 from status_buffer import StatusBuffer
+from ui.standard_widget.optional_message_box import OptionalMessageBox
 from ui.ui_about import AboutDialog
 from ui.ui_custom_key import CustomKeyDialog
 from ui.ui_indicator_lights import IndicatorLightsDialog
 from ui.ui_main import MainWindow
-from ui.ui_messagebox import MessageBox
 from ui.ui_paste_board import PasteBoardDialog
 from ui.ui_settings import SettingsDialog
+from ui.ui_widget.full_screen_floating_island import FullScreenFloatingIsland
 
 # 特定系统依赖
 if platform.system() == "Windows":
-    import pythoncom
-    import pyWinhook as pyHook
+    import keyboard_hook
 
 
-class ControllerEventProxy(QObject):
-    command_send_signal = Signal(str, object)
-    command_reply_signal = Signal(str, int, object)
+class ControllerEventExecutor(QObject):
+    device_execute_signal = Signal()
+    device_reply_signal = Signal(str, int, typing.Any)
 
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
-        self.mutex = QMutex()
-        self.mutex_locker = QMutexLocker(self.mutex)
+        self.device_mutex = QMutex()
+        self.deque_mutex = QMutex()
         self.controller_device = ControllerGeneralDevice()
-        self.command_send_signal.connect(self.command_send)
-        self.command_reply_signal.connect(self.command_reply)
+        self.deque: typing.Deque[typing.Tuple[str, typing.Any]] = (
+            collections.deque()
+        )
+
+        self.device_execute_signal.connect(
+            self.device_event_execute, type=Qt.ConnectionType.QueuedConnection
+        )
+        # reply 预留好了槽
+        # 但不需要使用所以暂时注释掉
+        # self.device_reply_signal.connect(self.device_reply, type=Qt.ConnectionType.QueuedConnection)
 
     def device_init(self, buffer: typing.Any) -> bool:
-        with self.mutex_locker:
+        with QMutexLocker(self.device_mutex):
             self.controller_device.device_init(buffer)
         return True
 
-    def command_send(
-        self, command: str, buffer: object
-    ) -> tuple[str, int, object]:
+    def device_close(self) -> None:
+        with QMutexLocker(self.device_mutex):
+            self.controller_device.device_close()
+
+    def device_event_store(self, command: str, buffer: typing.Any) -> None:
+        with QMutexLocker(self.deque_mutex):
+            self.deque.append((command, buffer))
+
+    def device_event_execute(self):
+        with QMutexLocker(self.deque_mutex):
+            try:
+                command, buffer = self.deque.popleft()
+            except IndexError:
+                return
+            while len(self.deque) > 0:
+                # 如果下一条命令和上一条命令一样切都为 mouse_absolute_write 则可以安全的跳过指令
+                if command == "mouse_absolute_write":
+                    next_command, next_buffer = self.deque.popleft()
+                    if (
+                        next_command == command
+                        and next_buffer.button == buffer.button
+                        and next_buffer.wheel == buffer.wheel
+                    ):
+                        command = next_command
+                        buffer = next_buffer
+                        continue
+                    else:
+                        self.deque.appendleft((next_command, next_buffer))
+                break
+        with QMutexLocker(self.device_mutex):
+            status_code: int
+            reply: typing.Any
+            _, status_code, reply = self.controller_device.device_event(
+                command, buffer
+            )
+            self.device_reply_signal.emit(command, status_code, reply)
+        pass
+
+    def device_reply(
+        self, command: str, status_code: int, data: typing.Any
+    ) -> None:
+        pass
+
+
+class ControllerEventProxy(QObject):
+    command_send_signal = Signal(str, typing.Any)
+    command_reply_signal = Signal(str, int, typing.Any)
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self.device_event_executor = ControllerEventExecutor()
+        self.execute_thread = QThread()
+
+        self.command_send_signal.connect(self.command_send)
+        self.command_reply_signal.connect(self.command_reply)
+        self.device_event_executor.device_reply_signal.connect(
+            self.command_reply_signal
+        )
+        self.device_event_executor.moveToThread(self.execute_thread)
+        self.execute_thread.start()
+
+    def device_init(self, buffer: typing.Any) -> bool:
+        return self.device_event_executor.device_init(buffer)
+
+    def device_close(self) -> None:
+        self.device_event_executor.device_close()
+
+    def command_send(self, command: str, buffer: typing.Any) -> None:
         """
         command list:
         "device_open"
@@ -130,21 +206,21 @@ class ControllerEventProxy(QObject):
         "device_check"
         "device_reload"
         "device_reset"
+        "device_sleep"
         "keyboard_read"
         "keyboard_write"
         "mouse_relative_write"
         "mouse_absolute_write"
         """
-        status_code: int = 1
-        reply = None
-        with self.mutex_locker:
-            _, status_code, reply = self.controller_device.device_event(
-                command, buffer
-            )
-            self.command_reply_signal.emit(command, status_code, reply)
-        return command, status_code, reply
+        # 把命令放入队列
+        self.device_event_executor.device_event_store(command, buffer)
 
-    def command_reply(self, command: str, status: int, data: object):
+        # 执行队列中的一个命令
+        self.device_event_executor.device_execute_signal.emit()
+
+    def command_reply(
+        self, command: str, status_code: int, data: typing.Any
+    ) -> None:
         pass
 
 
@@ -159,6 +235,12 @@ class QtThreadManager:
 
     def get(self, thread_name: str) -> QThread | None:
         thread_object = self.threads.get(thread_name, None)
+        return thread_object
+
+    def get_exists(self, thread_name: str) -> QThread:
+        thread_object = self.threads.get(thread_name, None)
+        if thread_object is None:
+            raise KeyError(f"thread {thread_name} not exists")
         return thread_object
 
     def delete(self, thread_name: str) -> None:
@@ -193,6 +275,12 @@ class QtTimerManager:
         timer_object = self.timers.get(timer_name, None)
         return timer_object
 
+    def get_exists(self, timer_name: str) -> QTimer:
+        timer_object = self.timers.get(timer_name, None)
+        if timer_object is None:
+            raise KeyError(f"timer {timer_name} not exists")
+        return timer_object
+
     def delete(self, timer_name: str) -> None:
         self.timers.pop(timer_name, None)
 
@@ -213,13 +301,7 @@ class QtTimerManager:
 class KeyboardCodeData:
     def __init__(self):
         # dict[key_name, hid_code]
-        self.key_name_to_hid_code: dict[str, int] = dict()
-        # 载入数据
-        self.load_keyboard_code_data()
-
-    # 载入键盘代码数据
-    def load_keyboard_code_data(self):
-        self.key_name_to_hid_code = KEY_NAME_TO_HID_CODE
+        self.key_name_to_hid_code: dict[str, int] = KEY_NAME_TO_HID_CODE
 
     # 转换 scan code 到 hid code
     @staticmethod
@@ -243,15 +325,11 @@ class KeyboardCodeData:
         return status, hid_code
 
     # 转换 key name 到 hid code
-    def convert_key_name_to_hid_code(self, key_name: str) -> tuple[bool, int]:
-        status: bool = False
-        hid_code: int | None = self.key_name_to_hid_code.get(key_name, None)
-        if hid_code is None:
+    @staticmethod
+    def convert_key_name_to_hid_code(key_name: str) -> tuple[bool, int]:
+        status, hid_code = key_name_to_hid_code(key_name)
+        if not status:
             logger.warning(f"Unknown key name: {key_name}")
-            hid_code = 0
-            return status, hid_code
-        else:
-            status = True
         return status, hid_code
 
 
@@ -259,16 +337,18 @@ class VideoSession(QObject):
     def __init__(self, parent: QObject | None = None):
         super().__init__(parent)
         self.parent: QObject | None = parent
-        self.device: QCameraDevice | None = None
-        self.camera: QCamera | None = None
-        self.video_sink: QVideoSink | None = None
-        self.capture_session: QMediaCaptureSession | None = None
-        self.image_capture: QImageCapture | None = None
-        self.video_record: QMediaRecorder | None = None
+        self.device: QCameraDevice = QCameraDevice()
+        self.camera: QCamera = QCamera(self.device)
+        self.video_sink: QVideoSink = QVideoSink()
+        self.capture_session: QMediaCaptureSession = QMediaCaptureSession()
+        self.image_capture: QImageCapture = QImageCapture(self.camera)
+        self.video_record: QMediaRecorder = QMediaRecorder(self.camera)
 
     # 按照视频设备描述返回设备对象
     @staticmethod
-    def get_video_device(device_description: str) -> QCameraDevice | None:
+    def get_target_video_device(
+        device_description: str,
+    ) -> QCameraDevice | None:
         cameras: list[QCameraDevice] = QMediaDevices.videoInputs()
         video_device: QCameraDevice | None = None
         for camera in cameras:
@@ -304,9 +384,12 @@ class VideoSession(QObject):
         device_description = config["device"]
         if device_description == "":
             raise RuntimeError(self.tr("Target video device is empty."))
-        self.device = self.get_video_device(device_description)
-        if self.device is None:
+        target_device = self.get_target_video_device(device_description)
+        if target_device is None:
+            self.device = QCameraDevice()
             raise RuntimeError(self.tr("Target video device not found."))
+        else:
+            self.device: QCameraDevice = target_device
         # 设置摄像头配置
         self.camera = QCamera(self.device)
         status = self.set_camera_format_with_config(config)
@@ -489,14 +572,16 @@ class MainWindowStatusBarManager:
 class AppMainWindow(MainWindow):
     # 窗口标题
     WINDOW_TITLE: str = "USB KVM Client"
+    QT_BASE_TRANSLATOR: QTranslator = QTranslator()
+    WINDOW_TRANSLATOR: QTranslator = QTranslator()
 
     def __init__(self, parent: QWidget | None = None):
         # 初始化父类
         super().__init__(parent)
 
         # 初始化状态
-        self.status = StatusBuffer()
-        self.status = StatusBuffer(
+        # self.status: StatusBuffer = StatusBuffer()
+        self.status: StatusBuffer = StatusBuffer(
             {
                 "screen_height": 0,
                 "screen_width": 0,
@@ -524,7 +609,7 @@ class AppMainWindow(MainWindow):
         )
 
         # self.mutex = QMutex()
-        # self.mutex_locker = QMutexLocker(self.mutex)
+        self.available_retranslate: list[typing.Any] = []
         self.threads = QtThreadManager()
         self.timer = QtTimerManager()
         self.source_directory: str = project_source_directory_path()
@@ -556,6 +641,19 @@ class AppMainWindow(MainWindow):
         self.paste_board_dialog = PasteBoardDialog()
         self.settings_dialog = SettingsDialog()
 
+        self.available_retranslate.extend(
+            [
+                self.about_dialog,
+                self.custom_key_dialog,
+                self.indicator_lights_dialog,
+                self.paste_board_dialog,
+                self.settings_dialog,
+            ]
+        )
+
+        # 刷新 ui 语言翻译
+        self.refresh_translate()
+
         # 加载图标
         # 加载窗口图标
         self.init_window_icon()
@@ -573,8 +671,8 @@ class AppMainWindow(MainWindow):
         # 初始化状态栏
         self.status_bar_manager = MainWindowStatusBarManager(self.statusbar)
 
-        # 初始化 video widget
-        self.video_widget: QVideoWidget | None = None
+        # 初始化 video standard_widget
+        self.video_widget: QVideoWidget = QVideoWidget()
         self.video_disconnect_label = QLabel()
         self.init_video_widget()
 
@@ -582,10 +680,11 @@ class AppMainWindow(MainWindow):
         self.video_session: VideoSession = VideoSession()
 
         # 初始化键盘以及鼠标数据的缓冲buffer
-        self.keyboard_key_buffer: KeyboardKeyBuffer | None = None
-        self.keyboard_indicator_buffer: KeyboardIndicatorBuffer | None = None
-        self.mouse_buffer: MouseStateBuffer | None = None
-        self.init_device_buffer()
+        self.keyboard_key_buffer: KeyboardKeyBuffer = KeyboardKeyBuffer()
+        self.keyboard_indicator_buffer: KeyboardIndicatorBuffer = (
+            KeyboardIndicatorBuffer()
+        )
+        self.mouse_buffer: MouseStateBuffer = MouseStateBuffer()
 
         # 鼠标设置
         self.mouse_last_pos: None | QPoint = None
@@ -624,11 +723,10 @@ class AppMainWindow(MainWindow):
         # controller_check_connection_timer.start()
 
         # 全屏模式设置
-        self.fullscreen_event_command: str = "unknown"
-        fullscreen_event_timer = self.timer.create("FULLSCREEN_EVENT_TIMER")
-        fullscreen_event_timer.timeout.connect(
-            self.execute_fullscreen_event_command
-        )
+        self.fullscreen_island = FullScreenFloatingIsland(self)
+        self.init_floating_island()
+        self.fullscreen_island.hide()
+        # self.available_retranslate.append(self.fullscreen_island)
 
         # 键盘钩子
         self.hook_manager = None
@@ -681,19 +779,25 @@ class AppMainWindow(MainWindow):
 
     # 初始化菜单栏图标
     def init_menu_icon(self) -> None:
-        # menu_device_menu
+        # menu_window
+        self.action_fullscreen.setIcon(self.load_icon("fullscreen.png"))
+        self.action_topmost.setIcon(self.load_icon("topmost.png"))
+        self.action_minimize.setIcon(self.load_icon("window-minimize.png"))
+        self.action_maximize.setIcon(self.load_icon("window-maximize.png"))
+        self.action_normal_size.setIcon(
+            self.load_icon("window-normal-size.png")
+        )
+        self.action_exit.setIcon(self.load_icon("window-close.png"))
+
+        # menu_device
         self.action_device_connect.setIcon(self.load_icon("connect.png"))
         self.action_device_disconnect.setIcon(self.load_icon("disconnect.png"))
         self.action_device_reload.setIcon(self.load_icon("reload.png"))
         self.action_device_reset.setIcon(self.load_icon("reset.png"))
         self.action_settings.setIcon(self.load_icon("setting.png"))
-        self.action_minimize.setIcon(self.load_icon("window-minimize.png"))
-        self.action_exit.setIcon(self.load_icon("window-close.png"))
 
         # menu_video
-        self.action_fullscreen.setIcon(self.load_icon("fullscreen.png"))
-        self.action_resize_window.setIcon(self.load_icon("resize.png"))
-        self.action_topmost.setIcon(self.load_icon("topmost.png"))
+        self.action_resize_window_to_video.setIcon(self.load_icon("resize.png"))
         self.action_keep_aspect_ratio.setIcon(self.load_icon("ratio.png"))
         self.action_capture_image.setIcon(self.load_icon("capture.png"))
         self.action_record_video.setIcon(self.load_icon("record.png"))
@@ -777,36 +881,55 @@ class AppMainWindow(MainWindow):
             self.action_mouse_jitter.setChecked(True)
         self.action_debug_mode.setChecked(project_var.debug_mode)
 
+    # 初始化全屏时浮岛窗口
+    def init_floating_island(self):
+        # 设定伸缩时保留的高度
+        self.fullscreen_island.COLLAPSED_STRIP = self.config.ui[
+            "island_collapsed_strip"
+        ]
+        popup_menu = self.fullscreen_island.popup_menu
+        for action in self.menuBar().actions():
+            popup_menu.addAction(action)
+
     # 初始化系统hook
     def init_system_hook(self):
         if platform.system() == "Windows":
             pass
         else:
             return
-        self.hook_manager = pyHook.HookManager()
-        self.hook_manager.KeyDown = self.hook_keyboard_down_event
-        self.hook_manager.KeyUp = self.hook_keyboard_up_event
-        pythoncom_timer = self.timer.create("PYTHONCOM_TIMER")
-        pythoncom_timer.timeout.connect(lambda: pythoncom.PumpWaitingMessages())
+        self.hook_manager = keyboard_hook.KeyboardHookManager()
+        self.hook_manager.handler_key_down = self.hook_keyboard_down_event
+        self.hook_manager.handler_key_up = self.hook_keyboard_up_event
+        hook_pump_timer = self.timer.create("HOOK_PUMP_TIMER")
+        hook_pump_timer.timeout.connect(keyboard_hook.pump_waiting_messages)
+        # 定时检查钩子安装状态与窗口激活状态是否一致
+        hook_state_timer = self.timer.create("HOOK_STATE_TIMER")
+        hook_state_timer.timeout.connect(self.sync_system_hook_state)
+        hook_state_timer.start(1000)
 
     # 初始化菜单信号
     # noinspection DuplicatedCode
     def init_menu_connect_signal(self):
+        # window 菜单
+        self.action_fullscreen.triggered.connect(self.fullscreen_state_toggle)
+        self.action_topmost.triggered.connect(self.window_topmost_state_toggle)
+        self.action_minimize.triggered.connect(self.showMinimized)
+        self.action_maximize.triggered.connect(self.showMaximized)
+        self.action_normal_size.triggered.connect(self.showNormal)
+        self.action_exit.triggered.connect(self.close)
+
         # device 菜单
         self.action_device_connect.triggered.connect(self.connect_devices)
         self.action_device_disconnect.triggered.connect(self.disconnect_devices)
         self.action_device_reload.triggered.connect(self.reload_devices)
         self.action_device_reset.triggered.connect(self.reset_devices)
         self.action_settings.triggered.connect(self.execute_settings_dialog)
-        self.action_minimize.triggered.connect(self.showMinimized)
-        self.action_exit.triggered.connect(self.close)
 
         # video 菜单
-        self.action_fullscreen.triggered.connect(self.fullscreen_state_toggle)
-        self.action_resize_window.triggered.connect(
-            self.resize_window_with_video_resolution
+        self.action_resize_window_to_video.triggered.connect(
+            self.resize_window_to_video_resolution
         )
-        self.action_topmost.triggered.connect(self.window_topmost_state_toggle)
+
         self.action_keep_aspect_ratio.triggered.connect(
             self.keep_aspect_ratio_toggle
         )
@@ -836,7 +959,7 @@ class AppMainWindow(MainWindow):
             lambda: self.paste_board_dialog.exec()
         )
         self.paste_board_dialog.send_string_signal.connect(
-            self.keyboard_send_string
+            self.keyboard_send_text
         )
         self.action_quick_paste.triggered.connect(self.quick_paste_toggle)
         self.action_indicator_light.triggered.connect(
@@ -907,13 +1030,16 @@ class AppMainWindow(MainWindow):
 
         # keyboard 菜单需要的信号连接
         self.indicator_lights_dialog.lock_key_clicked_signal.connect(
-            self.update_keyboard_indicator_buffer_with_hid_code
+            self.keyboard_simulation_click_with_keyname
         )
 
         # controller event
         self.controller_event.command_reply_signal.connect(
             self.controller_command_reply
         )
+
+        # island 信号
+        self.fullscreen_island.close_requested.connect(lambda: self.close())
         pass
 
     def load_config(self) -> None:
@@ -924,18 +1050,18 @@ class AppMainWindow(MainWindow):
             config_version = self.config.root["config_version"]
             if config_version != CONFIG_VERSION_STRING:
                 raise ValueError(
-                    self.tr(
-                        "The configuration file does not match the program.\n"
-                    )
-                    + self.tr(
-                        "Please delete the existing configuration file.\n"
-                    )
+                    "The configuration file version does not match expected."
                 )
-        except Exception as err:
+        except ValueError:
+            error_message = self.tr(
+                "Import config error:\n"
+                "The configuration file version does not match expected.\n"
+                "Please delete the existing configuration file.\n"
+            )
             QMessageBox.critical(
                 self,
                 self.tr("Error"),
-                self.tr("Import config error:\n{}\n").format(err),
+                error_message,
                 QMessageBox.StandardButton.Ok,
                 QMessageBox.StandardButton.NoButton,
             )
@@ -951,16 +1077,68 @@ class AppMainWindow(MainWindow):
         else:
             return self.tr("Disable")
 
-    # 固定延迟
-    @staticmethod
-    def sleep_ms(interval: int = 1):
-        QThread.msleep(interval)
+    def select_language_name(self) -> str:
+        config_language: str = self.config.ui["language"].lower()
+        # 获取系统当前区域设置
+        sys_locale = QLocale.system()
+        # 获取完整的语言环境名称
+        # 如 zh_cn en_us
+        sys_locale_name = sys_locale.name().lower()
+        if config_language == "auto":
+            ui_locale_name = sys_locale_name
+        elif config_language.startswith("english"):
+            ui_locale_name = "en_us"
+        elif config_language.startswith("simplified chinese"):
+            ui_locale_name = "zh_cn"
+        elif config_language.startswith("traditional chinese"):
+            ui_locale_name = "zh_tw"
+        else:
+            ui_locale_name = "en_us"
+        return ui_locale_name
 
-    # 随机延迟
-    @staticmethod
-    def random_sleep_ms(min_interval: int = 0, max_interval: int = 100):
-        random_time = int(random.uniform(min_interval, max_interval))
-        QThread.msleep(random_time)
+    def refresh_translate(self):
+        qt_base_translator = self.QT_BASE_TRANSLATOR
+        window_translator = self.WINDOW_TRANSLATOR
+
+        selected_language: str = self.select_language_name()
+        translation_directory_path = project_source_directory_path(
+            "translations"
+        )
+        translation_files_path: list[typing.Tuple[str, QTranslator]] = [
+            (
+                os.path.join(
+                    translation_directory_path, f"qtbase_{selected_language}.qm"
+                ),
+                qt_base_translator,
+            ),
+            (
+                os.path.join(
+                    translation_directory_path, f"main_{selected_language}.qm"
+                ),
+                window_translator,
+            ),
+        ]
+
+        # 清空翻译
+        qt_base_translator.load("")
+        window_translator.load("")
+
+        # 载入翻译
+        for file_path, translator in translation_files_path:
+            if os.path.isfile(file_path):
+                translator.load(file_path)
+
+        # 更新UI
+        self.retranslateUi(self)
+        for child in self.available_retranslate:
+            if hasattr(child, "retranslateUi"):
+                child.retranslateUi(child)
+            elif hasattr(child, "retranslate_ui"):
+                child.retranslateUi(child)
+            elif hasattr(child, "retranslate"):
+                child.retranslate(child)
+            else:
+                logger.error("Unknown object type.")
 
     ######################################################################
     # 主窗口相关函数
@@ -993,12 +1171,12 @@ class AppMainWindow(MainWindow):
         self.status.reverse_bool("fullscreen")
         if self.status.is_enabled("fullscreen"):
             if self.config.ui["tips_fullscreen"]:
-                _, close_next_tip = MessageBox.optional_information(
+                _, close_next_tip = OptionalMessageBox.optional_information(
                     self,
                     self.tr("Tip"),
                     self.tr("Press Ctrl+Alt+F11 to toggle fullscreen.\n")
                     + self.tr(
-                        "Or stay cursor at left top corner to show menu bar."
+                        "Or cursor over the top of the screen to pop up the floating island.\n"
                     ),
                     self.tr("Don't show again."),
                     False,
@@ -1013,36 +1191,17 @@ class AppMainWindow(MainWindow):
                     self.save_config()
             self.showFullScreen()
             self.action_fullscreen.setChecked(True)
-            self.action_resize_window.setEnabled(False)
+            self.action_resize_window_to_video.setEnabled(False)
             self.statusBar().hide()
             self.menuBar().hide()
+            self.fullscreen_island.show()
         else:
-            event_timer = self.timer.get("FULLSCREEN_EVENT_TIMER")
-            event_timer.stop()
             self.showNormal()
             self.action_fullscreen.setChecked(False)
-            self.action_resize_window.setEnabled(True)
+            self.action_resize_window_to_video.setEnabled(True)
             self.statusBar().show()
             self.menuBar().show()
-
-    # 执行全屏时事件命令
-    def execute_fullscreen_event_command(self):
-        event_timer = self.timer.get("FULLSCREEN_EVENT_TIMER")
-        command = self.fullscreen_event_command
-        if command == "show_menu_bar":
-            if self.menuBar().isHidden():
-                self.menuBar().show()
-        elif command == "show_status_bar":
-            if self.statusBar().isHidden():
-                self.statusBar().show()
-        elif command == "hide_all":
-            if not self.menuBar().isHidden():
-                self.menuBar().hide()
-            if not self.statusBar().isHidden():
-                self.statusBar().hide()
-        else:
-            pass
-        event_timer.stop()
+            self.fullscreen_island.hide()
 
     # 切换保持窗口在最前
     def window_topmost_state_toggle(self):
@@ -1287,7 +1446,7 @@ class AppMainWindow(MainWindow):
                 key_code, KeyStateEnum.PRESS
             )
             self.send_keyboard_buffer()
-        self.random_sleep_ms()
+        self.controller_sleep_ms(1)
         for key_code in key_code_list:
             self.update_keyboard_buffer_with_hid_code(
                 key_code, KeyStateEnum.RELEASE
@@ -1337,16 +1496,12 @@ class AppMainWindow(MainWindow):
 
     # 键盘模拟按下
     def keyboard_simulation_press(self, hid_code: int):
-        # 指示器按键则更新指示器buffer
-        self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         # 更新键盘buffer
         self.update_keyboard_buffer_with_hid_code(hid_code, KeyStateEnum.PRESS)
         self.send_keyboard_buffer()
 
     # 键盘模拟松开
     def keyboard_simulation_release(self, hid_code: int):
-        # 指示器按键则更新指示器buffer
-        self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         # 更新键盘buffer
         self.update_keyboard_buffer_with_hid_code(
             hid_code, KeyStateEnum.RELEASE
@@ -1355,19 +1510,65 @@ class AppMainWindow(MainWindow):
 
     # 键盘模拟单击按键
     def keyboard_simulation_click(self, hid_code: int):
+        # 指示器按键则更新指示器buffer
+        self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         self.keyboard_simulation_press(hid_code)
-        # 固定等待1ms
-        self.sleep_ms(1)
         self.keyboard_simulation_release(hid_code)
 
-    # 使用键盘发送字符串
-    def keyboard_send_string(self, data: str):
-        self.user_input_block(True)
+    # 键盘模拟单击按键
+    def keyboard_simulation_click_with_keyname(self, data: str):
+        result, hid_code = self.keyboard_code_data.convert_key_name_to_hid_code(
+            data
+        )
+        if not result:
+            return
+        self.keyboard_simulation_click(hid_code)
+
+    # 使用键盘发送字符
+    def keyboard_send_character(self, character: str):
+        if len(character) == 0:
+            return
+        if len(character) > 1:
+            character = character[0]
+
         # 获取必要的 hid code
         status, shift_hid_code = (
             self.keyboard_code_data.convert_key_name_to_hid_code("shift")
         )
         assert status is not False
+
+        # 检测是否需要shift
+        shift_flag = False
+        # 如果是需要shift的符号
+        if character in SHIFT_SYMBOL:
+            shift_flag = True
+        # 如果是大写字母
+        if character.isupper():
+            shift_flag = True
+
+        status, key_code = self.keyboard_code_data.convert_key_name_to_hid_code(
+            character
+        )
+        if not status:
+            logger.error(f"character key code not found: {character}")
+            return
+
+        if shift_flag:
+            self.keyboard_simulation_press(shift_hid_code)
+            self.keyboard_simulation_press(key_code)
+            self.controller_sleep_ms(self.config.paste_board["interval"])
+            self.keyboard_simulation_release(shift_hid_code)
+            self.keyboard_simulation_release(key_code)
+        else:
+            self.keyboard_simulation_press(key_code)
+            self.controller_sleep_ms(self.config.paste_board["interval"])
+            self.keyboard_simulation_release(key_code)
+        return
+
+    # 使用键盘发送字符串
+    def keyboard_send_text(self, data: str):
+        self.user_input_block(True)
+
         status, caps_lock_hid_code = (
             self.keyboard_code_data.convert_key_name_to_hid_code("caps_lock")
         )
@@ -1381,31 +1582,8 @@ class AppMainWindow(MainWindow):
         self.send_keyboard_buffer()
 
         for character in data:
-            if not character.isascii():
-                logger.critical(f"Character not supported: {character}")
-                continue
-            shift_flag = False
-            # 如果是需要shift的符号
-            if character in SHIFT_SYMBOL:
-                shift_flag = True
-            # 如果是大写字母
-            if character.isupper():
-                shift_flag = True
-            status, key_code = (
-                self.keyboard_code_data.convert_key_name_to_hid_code(character)
-            )
-            if not status:
-                logger.critical(f"character key code not found: {character}")
-                continue
-            if shift_flag:
-                self.keyboard_simulation_press(shift_hid_code)
-                self.keyboard_simulation_press(key_code)
-                self.keyboard_simulation_release(shift_hid_code)
-                self.keyboard_simulation_release(key_code)
-            else:
-                self.keyboard_simulation_press(key_code)
-                self.keyboard_simulation_release(key_code)
-            self.sleep_ms(self.config.paste_board["interval"])
+            self.keyboard_send_character(character)
+
         self.user_input_block(False)
 
     # 快速粘贴功能开关切换
@@ -1431,7 +1609,7 @@ class AppMainWindow(MainWindow):
         self.clear_keyboard_buffer()
         self.send_keyboard_buffer()
 
-        self.keyboard_send_string(text)
+        self.keyboard_send_text(text)
 
     # 发送请求同步键盘指示灯状态
     def sync_indicator_triggered(self):
@@ -1467,21 +1645,32 @@ class AppMainWindow(MainWindow):
                 QMessageBox.StandardButton.NoButton,
             )
             return
-        pythoncom_timer = self.timer.get("PYTHONCOM_TIMER")
         self.status.reverse_bool("hook_state")
         hook_state = self.status.get_bool("hook_state")
         self.action_system_hook.setChecked(hook_state)
         self.status_bar_manager.show_message(
             self.tr("System hook: ") + self.to_enabled_string(hook_state)
         )
-        if hook_state:
-            # 启动钩子前先同步键盘指示器状态，确保 Num Lock 等状态正确
-            self.sync_keyboard_indicator_to_buffer()
-            pythoncom_timer.start(5)
-            self.hook_manager.HookKeyboard()
+        self.sync_system_hook_state()
+
+    # 同步系统钩子状态
+    # 钩子安装状态需要与用户设置和窗口激活状态保持一致
+    # 窗口在后台时取消钩子, 窗口激活时打开钩子
+    def sync_system_hook_state(self) -> None:
+        if platform.system() != "Windows":
+            return
+        hook_pump_timer = self.timer.get_exists("HOOK_PUMP_TIMER")
+        expected_hook_state = self.status.get_bool("hook_state")
+        expected_hook_state = expected_hook_state and self.isActiveWindow()
+        hooked = self.hook_manager.is_hooked()
+        if expected_hook_state and not hooked:
+            hook_pump_timer.start(10)
+            self.hook_manager.hook_keyboard()
+        elif not expected_hook_state and hooked:
+            hook_pump_timer.stop()
+            self.hook_manager.unhook_keyboard()
         else:
-            self.hook_manager.UnhookKeyboard()
-            pythoncom_timer.stop()
+            pass
 
     # 捕获鼠标功能
     def mouse_capture_triggered(self) -> None:
@@ -1493,6 +1682,7 @@ class AppMainWindow(MainWindow):
     # 释放鼠标功能
     def mouse_capture_release_triggered(self) -> None:
         self.status.set_bool("mouse_capture", False)
+        self.status_bar_manager.show_message(self.tr("Mouse released"))
 
     # 相对模式菜单触发
     def mouse_relative_mode_triggered(self):
@@ -1566,7 +1756,7 @@ class AppMainWindow(MainWindow):
             return
         if self.config.ui["tips_system_warning"] is False:
             return
-        _, close_next_tip = MessageBox.optional_information(
+        _, close_next_tip = OptionalMessageBox.optional_information(
             self,
             self.tr("Tip"),
             self.tr("The current operating system is not Windows.\n")
@@ -1609,14 +1799,14 @@ class AppMainWindow(MainWindow):
         self.reload_controller("all")
         self.controller_command_send("keyboard_read", None)
         self.mouse_capture_triggered()
-        check_connection_timer = self.timer.get(
+        check_connection_timer = self.timer.get_exists(
             "CONTROLLER_CHECK_CONNECTION_TIMER"
         )
         check_connection_timer.start()
 
     # 断开控制器
     def disconnect_controller(self):
-        check_connection_timer = self.timer.get(
+        check_connection_timer = self.timer.get_exists(
             "CONTROLLER_CHECK_CONNECTION_TIMER"
         )
         check_connection_timer.stop()
@@ -1641,7 +1831,19 @@ class AppMainWindow(MainWindow):
     # 检查控制器连接
     def check_controller_connection(self):
         if self.status.is_enabled("controller"):
-            self.controller_command_send("check_connection", None)
+            self.controller_command_send("device_check_connection", None)
+
+    # 控制器发送睡眠时间信号
+    # interval 为睡眠毫秒数
+    def controller_sleep_ms(self, interval: int = 1):
+        self.controller_command_send("device_sleep", interval)
+
+    # 控制器发送随机睡眠时间信号
+    def controller_random_sleep_ms(
+        self, min_interval: int = 0, max_interval: int = 100
+    ):
+        random_time = int(random.uniform(min_interval, max_interval))
+        self.controller_sleep_ms(random_time)
 
     # 控制器发送命令信号
     def controller_command_send(self, command: str, data: typing.Any):
@@ -1649,17 +1851,18 @@ class AppMainWindow(MainWindow):
 
     # 接收控制器回复
     def controller_command_reply(
-        self, command: str, status: int, data: typing.Any
+        self, command: str, status_code: int, data: typing.Any
     ):
         ignored_command = [
             "device_reload",
             "device_reset",
+            "device_sleep",
             "mouse_relative_write",
             "mouse_absolute_write",
             "keyboard_write",
         ]
         if command == "device_open":
-            if status == 0:
+            if status_code == 0:
                 # open 成功
                 self.status.set_bool("controller", True)
                 self.status_bar_manager.show_message(
@@ -1672,13 +1875,13 @@ class AppMainWindow(MainWindow):
                 )
         elif command == "device_close":
             self.status.set_bool("controller", False)
-        elif command == "check_connection":
-            if status != 0:
+        elif command == "device_check_connection":
+            if status_code != 0:
                 # 检查连接返回失败
                 self.disconnect_controller()
                 self.connect_controller()
         elif command == "keyboard_read":
-            if status == 0:
+            if status_code == 0:
                 logger.debug("keyboard indicator read succeed")
                 self.keyboard_indicator_buffer.from_dict(data)
                 self.status_bar_manager.update_label_status(
@@ -1710,14 +1913,6 @@ class AppMainWindow(MainWindow):
         )
         return button_code
 
-    def init_device_buffer(self):
-        # 初始化键盘以及鼠标数据的缓冲buffer
-        self.keyboard_key_buffer: KeyboardKeyBuffer = KeyboardKeyBuffer()
-        self.keyboard_indicator_buffer: KeyboardIndicatorBuffer = (
-            KeyboardIndicatorBuffer()
-        )
-        self.mouse_buffer = MouseStateBuffer()
-
     # 发送键盘缓冲区到控制器
     def send_keyboard_buffer(self):
         if project_var.debug_mode:
@@ -1728,6 +1923,10 @@ class AppMainWindow(MainWindow):
         self.status_bar_manager.update_label_status(
             self.keyboard_key_buffer, self.keyboard_indicator_buffer
         )
+        # 从缓冲区中清理已松开的按键
+        self.keyboard_key_buffer.clear_released()
+        # 控制器固定等待至少 1ms 确保系统能正确的响应按键信号
+        self.controller_sleep_ms(1)
 
     # 清空键盘按键缓冲区
     def clear_keyboard_buffer(self):
@@ -1898,6 +2097,7 @@ class AppMainWindow(MainWindow):
             )
         else:
             self.mouse_report_interval = 1000 / frame_rate
+        self.mouse_report_interval = int(self.mouse_report_interval)
         mouse_report_timer = self.timer.get("MOUSE_REPORT_TIMER")
         assert mouse_report_timer is not None
         if mouse_report_timer is not None:
@@ -1931,7 +2131,7 @@ class AppMainWindow(MainWindow):
     # video widget相关函数
     ######################################################################
 
-    # 初始化 video widget
+    # 初始化 video standard_widget
     def init_video_widget(self) -> None:
         self.video_widget = QVideoWidget()
         self.video_widget.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -2012,7 +2212,7 @@ class AppMainWindow(MainWindow):
         self.move(point)
 
     # 通过视频设备分辨率调整窗口大小
-    def resize_window_with_video_resolution(self) -> None:
+    def resize_window_to_video_resolution(self) -> None:
         if self.status.is_enabled("fullscreen"):
             return
         menu_bar_height = self.menubar.height()
@@ -2099,32 +2299,40 @@ class AppMainWindow(MainWindow):
             QMessageBox.StandardButton.NoButton,
         )
 
+    # 启动视频设备
+    def start_video_device(self) -> None:
+        # 使用配置初始化设备
+        self.video_session.init_video_device_with_config(self.config.video)
+        self.video_session.init_capture_session_with_config(
+            self.config.video_record
+        )
+
+        camera = self.video_session.camera
+        video_sink = self.video_session.video_sink
+        # 注册信号
+        video_sink.videoFrameChanged.connect(self.video_widget_frame_changed)
+        camera.errorOccurred.connect(self.video_device_error_occurred)
+        camera.start()
+
+        if not camera.isActive():
+            self.status.set_bool("camera", False)
+            raise RuntimeError(self.tr("Video device start failed"))
+        else:
+            self.status.set_bool("camera", True)
+        self.status.set_bool("video_recording", False)
+
     # 视频设备初始化
-    # noinspection PyUnresolvedReferences
     def init_video_device(self) -> bool:
         status: bool = False
         try:
-            # 使用配置初始化设备
-            self.video_session.init_video_device_with_config(self.config.video)
-            self.video_session.init_capture_session_with_config(
-                self.config.video_record
-            )
 
-            camera = self.video_session.camera
-            video_sink = self.video_session.video_sink
-            # 注册信号
-            video_sink.videoFrameChanged.connect(
-                self.video_widget_frame_changed
-            )
-            camera.errorOccurred.connect(self.video_device_error_occurred)
-            camera.start()
-
-            if not camera.isActive():
-                self.status.set_bool("camera", False)
-                raise RuntimeError(self.tr("Video device start failed"))
+            if self.config.video["device"] == "empty_device":
+                # 设置为 empty_device 时默认不启用摄像头
+                # 此值可作为无采集卡时仅作为输入设备使用
+                pass
             else:
-                self.status.set_bool("camera", True)
-            self.status.set_bool("video_recording", False)
+                # 使用配置初始化设备
+                self.start_video_device()
             status = True
         except RuntimeError as error:
             error_message = str(error)
@@ -2142,16 +2350,19 @@ class AppMainWindow(MainWindow):
         if not self.init_video_device():
             return
         if not self.status.is_enabled("fullscreen"):
-            self.resize_window_with_video_resolution()
-        fps = self.video_session.camera.cameraFormat().maxFrameRate()
-        self.set_video_widget_enable(True)
-        self.setWindowTitle(
-            f"{self.WINDOW_TITLE}"
-            + " - "
-            + f"{self.config.video["resolution_x"]}x{self.config.video["resolution_y"]}"
-            + " @ "
-            + f"{fps:.1f}"
-        )
+            self.resize_window_to_video_resolution()
+        if self.status.get_bool("camera"):
+            fps = self.video_session.camera.cameraFormat().maxFrameRate()
+            self.set_video_widget_enable(True)
+            self.setWindowTitle(
+                f"{self.WINDOW_TITLE}"
+                + " - "
+                + f"{self.config.video["resolution_x"]}x{self.config.video["resolution_y"]}"
+                + " @ "
+                + f"{fps:.1f}"
+            )
+        else:
+            fps = 60
         self.update_mouse_report_frequency(int(fps))
 
     # 断开视频设备
@@ -2166,53 +2377,57 @@ class AppMainWindow(MainWindow):
     ######################################################################
     # Hook
     ######################################################################
-    # pyhook scan code 转换表
-    SCAN_CODE_REMAP = {
-        "Lcontrol": 0x001D,
-        "Rcontrol": 0xE01D,
-        # menu is alt
-        "Lmenu": 0x0038,
-        "Rmenu": 0xE038,
-        "Lwin": 0xE05B,
-        "Rwin": 0xE05C,
-    }
-
     # hook 键盘按键按下事件
-    def hook_keyboard_down_event(self, event) -> bool:
-        logger.debug(f"Hook: {event.Key} {hex(event.ScanCode)}")
-        if event.Key in self.SCAN_CODE_REMAP:
-            scan_code = self.SCAN_CODE_REMAP[event.Key]
-        else:
-            scan_code = event.ScanCode
+    def hook_keyboard_down_event(
+        self, event: keyboard_hook.HookKeyboardEvent
+    ) -> bool:
+        logger.debug(
+            f"keyboard down hook: vk({hex(event.vk_code)}) scan_code({hex(event.scan_code)})"
+        )
+        # 远程控制软件(如 rustdesk for android)通过 KEYEVENTF_UNICODE 注入的字符
+        # 会以 VK_PACKET 形式出现，真正的 Unicode 编码由 scan_code 携带
+        # 仅当字符能映射到 HID 键码时才转发，其余 Unicode 字符直接忽略。
+        if event.is_packet:
+            char = event.unicode_char
+            if char is not None:
+                self.keyboard_send_character(char)
+            return False
+        scan_code = event.scan_code
         status, hid_code = (
             self.keyboard_code_data.convert_scan_code_to_hid_code(scan_code)
         )
         if status:
             self.handle_key_press_with_hid_code(hid_code)
+        else:
+            logger.warning(f"unknown scan_code: {hex(event.scan_code)}")
         if scan_code not in self.hook_pressed_keys:
             self.hook_pressed_keys.append(scan_code)
         # 如果返回 True 则按键事件会继续传播
-        # 如果返回 False 则按键事件会继续传播
+        # 如果返回 False 则按键事件不会继续传播
         # 因为不希望事件继续传递所以永远返回 False
         return False
 
     # hook 键盘按键弹起事件
-    def hook_keyboard_up_event(self, event) -> bool:
-        if event.Key in self.SCAN_CODE_REMAP:
-            scan_code = self.SCAN_CODE_REMAP[event.Key]
-        else:
-            scan_code = event.ScanCode
+    def hook_keyboard_up_event(
+        self, event: keyboard_hook.HookKeyboardEvent
+    ) -> bool:
+        # VK_PACKET 事件已在按下时处理，所以弹起时直接全部拦截即可
+        if event.is_packet:
+            return False
+        scan_code = event.scan_code
         status, hid_code = (
             self.keyboard_code_data.convert_scan_code_to_hid_code(scan_code)
         )
         if status:
             self.handle_key_release_with_hid_code(hid_code)
+        else:
+            logger.warning(f"unknown scan_code: {hex(event.scan_code)}")
         try:
             self.hook_pressed_keys.remove(scan_code)
         except ValueError:
             pass
         # 如果返回 True 则按键事件会继续传播
-        # 如果返回 False 则按键事件会继续传播
+        # 如果返回 False 则按键事件不会继续传播
         # 因为不希望事件继续传递所以永远返回 False
         return False
 
@@ -2240,13 +2455,17 @@ class AppMainWindow(MainWindow):
         connection_config: dict[str, typing.Any] = copy.copy(
             self.config.connection
         )
-        mouse_config: dict[str, typing.Any] = copy.copy(self.config.mouse)
+        ui_config: dict[str, typing.Any] = copy.copy(self.config.ui)
+
+        # 刷新设备信息
+        self.settings_dialog.refresh_devices()
 
         # 传入配置文件的配置
         self.settings_dialog.set_video_config(video_config)
         self.settings_dialog.set_controller_config(controller_config)
         self.settings_dialog.set_mouse_config(mouse_config)
         self.settings_dialog.set_connection_config(connection_config)
+        self.settings_dialog.set_ui_config(ui_config)
 
         # 根据配置文件选择合适的选项
         self.settings_dialog.refresh_with_config()
@@ -2261,9 +2480,33 @@ class AppMainWindow(MainWindow):
                 video_config = self.settings_dialog.get_video_config()
                 controller_config = self.settings_dialog.get_controller_config()
                 connection_config = self.settings_dialog.get_connection_config()
+                ui_config = self.settings_dialog.get_ui_config()
                 # 检查选项是否有效
                 if video_config["device"] == "":
                     raise ValueError("Invalid device")
+                if video_config["device"] == "empty_device":
+                    if self.config.ui["tips_empty_video_device"]:
+                        _, close_next_tip = (
+                            OptionalMessageBox.optional_information(
+                                self,
+                                self.tr("Tip"),
+                                self.tr(
+                                    "Select empty_device means that no video output will be used.\n"
+                                )
+                                + self.tr("Used only for input operations.\n"),
+                                self.tr("Don't show again."),
+                                False,
+                                QMessageBox.StandardButton.Ok,
+                                QMessageBox.StandardButton.NoButton,
+                            )
+                        )
+                        if (
+                            close_next_tip is True
+                            and self.config.ui["tips_empty_video_device"]
+                            is True
+                        ):
+                            self.config.ui["tips_empty_video_device"] = False
+                            self.save_config()
                 # 与配置文件合并
                 self.config.video.update(video_config)
                 self.config.controller.update(controller_config)
@@ -2271,6 +2514,7 @@ class AppMainWindow(MainWindow):
                     self.settings_dialog.get_mouse_config()
                 )
                 self.config.connection.update(connection_config)
+                self.config.ui.update(ui_config)
 
                 # 同步鼠标抖动开关状态，兼容原菜单开关
                 jitter_enabled = self.config.mouse.get("jitter_enabled", False)
@@ -2297,49 +2541,19 @@ class AppMainWindow(MainWindow):
                 )
             # 尝试按照新配置启动
             # self.video_device_reset()
+            # 刷新界面语言
+            self.refresh_translate()
+            pass
         pass
 
     ######################################################################
     # 窗口事件处理
     ######################################################################
 
-    # 全屏状态下鼠标动作事件
-    def handle_mouse_on_fullscreen_event(self, x: int, y: int):
-        if not self.status.is_enabled("fullscreen"):
-            return
-        # 常量
-        const_pixel = 5
-        const_delay_ms = 1000 * 3
-
-        width = self.width()
-        height = self.height()
-        event_timer = self.timer.get("FULLSCREEN_EVENT_TIMER")
-
-        current_command = self.fullscreen_event_command
-        # next_command = current_command
-        if y < const_pixel and x < const_pixel:
-            # 鼠标在左上角
-            next_command = "show_menu_bar"
-        elif x > width - const_pixel and y > height - const_pixel:
-            # 鼠标在右下角
-            next_command = "show_status_bar"
-        else:
-            # 鼠标在其他地方
-            next_command = "hide_all"
-        self.fullscreen_event_command = next_command
-        # 如果命令发生了变化，说明状态应该改变
-        if current_command != next_command:
-            event_timer.stop()
-            event_timer.start(const_delay_ms)
-        pass
-
     def handle_mouse_move_event(self, event: QMouseEvent) -> None:
         self.update_last_user_input_time()
         p = event.position().toPoint()
         x, y = p.x(), p.y()
-        # 全屏状态下检测鼠标位置
-        if self.status.is_enabled("fullscreen"):
-            self.handle_mouse_on_fullscreen_event(x, y)
         # 非鼠标捕获的情况下显示光标
         if not self.status.is_enabled("mouse_capture"):
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -2406,6 +2620,8 @@ class AppMainWindow(MainWindow):
         self.mouse_buffer.set_button(button_code, button_state)
         if self.status.is_enabled("relative_mode"):
             self.mouse_buffer.clear_point()
+        if project_var.debug_mode:
+            logger.debug(f"mouse send: {str(self.mouse_buffer)}")
         self.controller_command_send(command, self.mouse_buffer.dup())
         self.mouse_buffer.clear_button()
 
@@ -2420,9 +2636,9 @@ class AppMainWindow(MainWindow):
             return
         y = event.angleDelta().y()
         if y == 120:
-            self.mouse_buffer.wheel = MouseWheelStateEnum.DOWN
-        elif y == -120:
             self.mouse_buffer.wheel = MouseWheelStateEnum.UP
+        elif y == -120:
+            self.mouse_buffer.wheel = MouseWheelStateEnum.DOWN
         else:
             self.mouse_buffer.wheel = MouseWheelStateEnum.STOP
         self.mouse_report_scroll()
@@ -2460,6 +2676,14 @@ class AppMainWindow(MainWindow):
             or self.keyboard_key_buffer.is_pressed(alt_right)
         ):
             return handle_status
+
+        # Ctrl+Alt+F10 关闭系统钩子(安全退出, 恢复本地键盘)
+        _, f10 = self.keyboard_code_data.convert_key_name_to_hid_code("f10")
+        if self.status.is_enabled(
+            "hook_state"
+        ) and self.keyboard_key_buffer.is_pressed(f10):
+            self.system_hook_triggered()
+            handle_status = True
 
         # Ctrl+Alt+F11 退出全屏
         _, f11 = self.keyboard_code_data.convert_key_name_to_hid_code("f11")
@@ -2525,17 +2749,23 @@ class AppMainWindow(MainWindow):
 
         # 向控制器发送命令
         self.send_keyboard_buffer()
-        # 从缓冲区中清理已松开的按键
-        self.keyboard_key_buffer.clear_released()
 
     # 键盘按下事件
     def handle_key_press_with_event(self, event: QKeyEvent) -> bool:
         status: bool = False
         if event.isAutoRepeat():
             return status
+        # Windows 下 VK_PACKET 特殊处理
+        virutal_key = event.nativeVirtualKey()
+        if platform.system() == "Windows" and virutal_key == 0xE7:
+            text = event.text()
+            if text:
+                self.keyboard_send_character(text)
+                return True
         status, hid_code = (
             self.keyboard_code_data.convert_qt_key_event_to_hid_code(event)
         )
+        # logger.debug(f"handle_key_press_with_event: {hex(hid_code)}")
         if status:
             self.handle_key_press_with_hid_code(hid_code)
         return status
@@ -2545,9 +2775,14 @@ class AppMainWindow(MainWindow):
         status: bool = False
         if event.isAutoRepeat():
             return status
+        # VK_PACKET
+        virutal_key = event.nativeVirtualKey()
+        if platform.system() == "Windows" and virutal_key == 0xE7:
+            return True
         status, hid_code = (
             self.keyboard_code_data.convert_qt_key_event_to_hid_code(event)
         )
+        # logger.debug(f"handle_key_release_event: {hex(hid_code)}")
         if status:
             self.handle_key_release_with_hid_code(hid_code)
         status = True
@@ -2562,18 +2797,28 @@ class AppMainWindow(MainWindow):
             QEvent.Type.WindowDeactivate,
         ]
         if event.type() in window_activate_event:
-            if not self.isActiveWindow() and self.status.is_enabled(
-                "controller"
-            ):
+            is_active_window: bool = self.isActiveWindow()
+            if not is_active_window and self.status.is_enabled("relative_mode"):
+                # 如果窗口失焦自动释放鼠标捕捉
+                self.mouse_capture_release_triggered()
+            if not is_active_window and self.status.is_enabled("controller"):
                 # 窗口失去焦点时释放键盘和鼠标
                 # 防止卡键
                 self.reload_controller("all")
-                pass
+            # 窗口激活状态变化时同步系统钩子状态
+            self.sync_system_hook_state()
+            pass
         logger.debug(f"window change event: {event}")
 
     # 关闭事件
     def handle_close_event(self) -> None:
+        # 关闭子窗口
+        self.fullscreen_island.close_requested.disconnect()
+        self.fullscreen_island.shutdown()
+        self.fullscreen_island.close()
+        # 断开控制器
         self.disconnect_controller()
+        # 停止计时器和线程
         self.timer.quit_all()
         self.threads.quit_all()
 
@@ -2621,6 +2866,20 @@ class AppMainWindow(MainWindow):
         super().closeEvent(event)
         self.handle_close_event()
 
+    # 覆盖 showNormal 函数
+    def showNormal(self) -> None:
+        super().showNormal()
+        # 如果处于全屏状态强制关闭全屏状态
+        if self.status.is_enabled("fullscreen"):
+            self.fullscreen_state_toggle()
+
+    # 覆盖 showMaximized 函数
+    def showMaximized(self) -> None:
+        super().showMaximized()
+        # 如果处于全屏状态强制关闭全屏状态
+        if self.status.is_enabled("fullscreen"):
+            self.fullscreen_state_toggle()
+
 
 def clear_splash():
     if "NUITKA_ONEFILE_PARENT" in os.environ:
@@ -2662,7 +2921,8 @@ def command_line_parser():
 
     args = parser.parse_args()
     # 根据 debug 参数设置 debug 模式
-    project_var.debug_mode = args.debug
+    if not project_var.debug_mode:
+        project_var.debug_mode = args.debug
     logger_init()
 
 
@@ -2689,19 +2949,17 @@ def main():
     command_line_parser()
     argv = sys.argv
     app = QApplication(argv)
-    # locale = QLocale().system().name().lower()
-    translate_files: list[str] = []
-    translate_directory_path = project_source_directory_path("translate")
-    translate_directory_files: list[str] = os.listdir(translate_directory_path)
-    for file_name in translate_directory_files:
-        file_path = os.path.join(translate_directory_path, file_name)
-        file_ext = os.path.splitext(file_name)[-1]
-        if file_ext == ".qm":
-            translate_files.append(file_path)
-    for file_path in translate_files:
-        translator = QTranslator(app)
-        if translator.load(file_path):
-            app.installTranslator(translator)
+
+    # 创建翻译器
+    app_translator = QTranslator(app)
+    qt_base_translator = QTranslator(app)
+    # 覆盖窗口类默认的翻译器
+    AppMainWindow.QT_BASE_TRANSLATOR = qt_base_translator
+    AppMainWindow.WINDOW_TRANSLATOR = app_translator
+    # 安装翻译器
+    QCoreApplication.installTranslator(AppMainWindow.QT_BASE_TRANSLATOR)
+    QCoreApplication.installTranslator(AppMainWindow.WINDOW_TRANSLATOR)
+
     my_window = AppMainWindow()
     my_window.show()
     # QTimer.singleShot(100, my_window.shortcut_status)
