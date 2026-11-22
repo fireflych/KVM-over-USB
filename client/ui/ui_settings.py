@@ -200,6 +200,7 @@ class SettingsDialog(QDialog, settings_ui.Ui_SettingsDialog):
     def refresh_with_config(self) -> None:
         self.refresh_video_devices_with_config()
         self.refresh_controller_devices_with_config()
+        self.refresh_mouse_with_config()
         self.refresh_connection_with_config()
 
     def auto_string(self) -> str:

@@ -68,6 +68,9 @@
      <string>Mouse</string>
     </property>
     <addaction name="action_pause_mouse"/>
+    <addaction name="action_mouse_jitter"/>
+    <addaction name="action_mouse_jitter_idle_time"/>
+    <addaction name="action_mouse_jitter_distance"/>
     <addaction name="action_reload_mouse"/>
     <addaction name="separator"/>
     <addaction name="action_capture_mouse"/>
@@ -361,6 +364,24 @@
    </property>
    <property name="text">
     <string>Pause</string>
+   </property>
+  </action>
+  <action name="action_mouse_jitter">
+   <property name="checkable">
+    <bool>true</bool>
+   </property>
+   <property name="text">
+    <string>Mouse jitter</string>
+   </property>
+  </action>
+  <action name="action_mouse_jitter_idle_time">
+   <property name="text">
+    <string>Mouse jitter idle time</string>
+   </property>
+  </action>
+  <action name="action_mouse_jitter_distance">
+   <property name="text">
+    <string>Mouse jitter distance</string>
    </property>
   </action>
   <action name="action_sync_indicator">

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import typing
 
 from PySide6.QtCore import (
@@ -601,6 +602,7 @@ class AppMainWindow(MainWindow):
                 "relative_mode": False,
                 "hide_cursor": False,
                 "correction_cursor": False,
+                "mouse_jitter": False,
                 # 其他
                 "block_input": False,
             }
@@ -628,6 +630,9 @@ class AppMainWindow(MainWindow):
         # 加载配置文件
         self.config: MainConfig = MainConfig()
         self.load_config()
+        self.status.set_bool(
+            "mouse_jitter", self.config.mouse.get("jitter_enabled", False)
+        )
 
         # 子窗口
         self.about_dialog = AboutDialog()
@@ -686,6 +691,16 @@ class AppMainWindow(MainWindow):
         self.mouse_relative_speed = self.config.mouse["relative_speed"]
         self.mouse_report_interval = 20
         self.mouse_report_at_next: bool = False
+        self.last_user_input_time = time.time()
+        self.mouse_jitter_idle_interval = self.config.mouse.get(
+            "jitter_idle_interval", 10
+        )
+        self.mouse_jitter_distance = self.config.mouse.get(
+            "jitter_distance", 0.02
+        )
+        self.mouse_jitter_direction = 1
+        self.last_jitter_time = time.time()
+
         mouse_report_timer = self.timer.create("MOUSE_REPORT_TIMER")
         mouse_report_timer.timeout.connect(self.mouse_report_timer_triggered)
         mouse_report_timer.start(self.mouse_report_interval)
@@ -862,6 +877,8 @@ class AppMainWindow(MainWindow):
         if self.config.ui["quick_paste"]:
             self.status.set_bool("quick_paste", True)
             self.action_quick_paste.setChecked(True)
+        if self.status.is_enabled("mouse_jitter"):
+            self.action_mouse_jitter.setChecked(True)
         self.action_debug_mode.setChecked(project_var.debug_mode)
 
     # 初始化全屏时浮岛窗口
@@ -967,6 +984,13 @@ class AppMainWindow(MainWindow):
         )
         self.action_release_mouse.triggered.connect(
             self.mouse_capture_release_triggered
+        )
+        self.action_mouse_jitter.triggered.connect(self.mouse_jitter_triggered)
+        self.action_mouse_jitter_idle_time.triggered.connect(
+            self.mouse_jitter_idle_time_triggered
+        )
+        self.action_mouse_jitter_distance.triggered.connect(
+            self.mouse_jitter_distance_triggered
         )
         self.action_relative_mouse.triggered.connect(
             self.mouse_relative_mode_triggered
@@ -1293,6 +1317,119 @@ class AppMainWindow(MainWindow):
             self.status.set_bool("pause_mouse", True)
         else:
             self.status.set_bool("pause_mouse", False)
+
+        if self.action_mouse_jitter.isChecked() is True:
+            self.status.set_bool("mouse_jitter", True)
+        else:
+            self.status.set_bool("mouse_jitter", False)
+
+    def mouse_jitter_triggered(self):
+        jitter_status = self.action_mouse_jitter.isChecked()
+        self.status.set_bool("mouse_jitter", jitter_status)
+        self.config.mouse["jitter_enabled"] = jitter_status
+        self.save_config()
+        if jitter_status:
+            self.status_bar_manager.show_message(
+                self.tr("Mouse jitter enabled")
+            )
+        else:
+            self.status_bar_manager.show_message(
+                self.tr("Mouse jitter disabled")
+            )
+
+    def mouse_jitter_idle_time_triggered(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        current = float(self.mouse_jitter_idle_interval)
+        value, ok = QInputDialog.getDouble(
+            self,
+            self.tr("Mouse jitter idle time"),
+            self.tr("Idle time before jitter (seconds):"),
+            current,
+            1.0,
+            9999.0,
+            1,
+        )
+        if not ok:
+            return
+
+        self.mouse_jitter_idle_interval = float(value)
+        self.config.mouse["jitter_idle_interval"] = (
+            self.mouse_jitter_idle_interval
+        )
+        self.save_config()
+        self.status_bar_manager.show_message(
+            self.tr("Mouse jitter idle time set to {0:.1f}s").format(
+                self.mouse_jitter_idle_interval
+            )
+        )
+
+    def mouse_jitter_distance_triggered(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        current = float(self.mouse_jitter_distance)
+        value, ok = QInputDialog.getDouble(
+            self,
+            self.tr("Mouse jitter distance"),
+            self.tr("Jitter movement distance (0.001-1.0):"),
+            current,
+            0.001,
+            1.0,
+            3,
+        )
+        if not ok:
+            return
+
+        self.mouse_jitter_distance = float(value)
+        self.config.mouse["jitter_distance"] = self.mouse_jitter_distance
+        self.save_config()
+        self.status_bar_manager.show_message(
+            self.tr("Mouse jitter distance set to {0:.3f}").format(
+                self.mouse_jitter_distance
+            )
+        )
+
+    def update_last_user_input_time(self):
+        self.last_user_input_time = time.time()
+        self.last_jitter_time = time.time()
+
+    def maybe_send_mouse_jitter(self):
+        if not self.status.is_enabled("mouse_jitter"):
+            return
+        if self.status.is_enabled("pause_mouse") or self.status.is_enabled(
+            "block_input"
+        ):
+            return
+        if not self.status.is_enabled("mouse_capture"):
+            return
+
+        now = time.time()
+        idle_time = now - self.last_user_input_time
+        # 空闲时间未达到初始等待时间，不发送
+        if idle_time < self.mouse_jitter_idle_interval:
+            return
+
+        # 循环模式：每隔 jitter_idle_interval 秒发送一次抖动
+        time_since_last_jitter = now - self.last_jitter_time
+        if time_since_last_jitter < self.mouse_jitter_idle_interval:
+            return
+
+        self.last_jitter_time = now
+        jitter_offset = self.mouse_jitter_distance * self.mouse_jitter_direction
+        self.mouse_jitter_direction *= -1
+
+        if self.status.is_enabled("relative_mode"):
+            jitter_buffer = self.mouse_buffer.dup()
+            jitter_buffer.set_point(jitter_offset, -jitter_offset)
+            self.controller_command_send("mouse_relative_write", jitter_buffer)
+        else:
+            cur_x, cur_y = self.mouse_buffer.get_point()
+            new_x = max(min(cur_x + jitter_offset, 1.0), 0.0)
+            new_y = max(min(cur_y - jitter_offset, 1.0), 0.0)
+            jitter_buffer = self.mouse_buffer.dup()
+            jitter_buffer.set_point(new_x, new_y)
+            self.mouse_buffer.set_point(new_x, new_y)
+            self.controller_command_send("mouse_absolute_write", jitter_buffer)
 
     # 快捷键发送
     def shortcut_key_send(self, keys: list[str]):
@@ -1988,6 +2125,8 @@ class AppMainWindow(MainWindow):
                 self.mouse_buffer.clear_point()
         self.mouse_report_at_next = False
 
+        self.maybe_send_mouse_jitter()
+
     ######################################################################
     # video widget相关函数
     ######################################################################
@@ -2324,6 +2463,7 @@ class AppMainWindow(MainWindow):
         # 传入配置文件的配置
         self.settings_dialog.set_video_config(video_config)
         self.settings_dialog.set_controller_config(controller_config)
+        self.settings_dialog.set_mouse_config(mouse_config)
         self.settings_dialog.set_connection_config(connection_config)
         self.settings_dialog.set_ui_config(ui_config)
 
@@ -2370,8 +2510,25 @@ class AppMainWindow(MainWindow):
                 # 与配置文件合并
                 self.config.video.update(video_config)
                 self.config.controller.update(controller_config)
+                self.config.mouse.update(
+                    self.settings_dialog.get_mouse_config()
+                )
                 self.config.connection.update(connection_config)
                 self.config.ui.update(ui_config)
+
+                # 同步鼠标抖动开关状态，兼容原菜单开关
+                jitter_enabled = self.config.mouse.get("jitter_enabled", False)
+                self.action_mouse_jitter.setChecked(jitter_enabled)
+                self.status.set_bool("mouse_jitter", jitter_enabled)
+
+                # 同步鼠标抖动参数
+                self.mouse_jitter_idle_interval = float(
+                    self.config.mouse.get("jitter_idle_interval", 10)
+                )
+                self.mouse_jitter_distance = float(
+                    self.config.mouse.get("jitter_distance", 0.02)
+                )
+
                 # 保存配置
                 self.save_config()
             except ValueError:
@@ -2394,6 +2551,7 @@ class AppMainWindow(MainWindow):
     ######################################################################
 
     def handle_mouse_move_event(self, event: QMouseEvent) -> None:
+        self.update_last_user_input_time()
         p = event.position().toPoint()
         x, y = p.x(), p.y()
         # 非鼠标捕获的情况下显示光标
@@ -2417,6 +2575,7 @@ class AppMainWindow(MainWindow):
 
     # 鼠标按下事件
     def handle_mouse_press_event(self, event: QMouseEvent) -> None:
+        self.update_last_user_input_time()
         if (
             not self.status.is_enabled("mouse_capture")
             and event.button() == Qt.MouseButton.LeftButton
@@ -2445,6 +2604,7 @@ class AppMainWindow(MainWindow):
 
     # 鼠标松开事件
     def handle_mouse_release_event(self, event: QMouseEvent) -> None:
+        self.update_last_user_input_time()
         if not self.status.is_enabled("mouse_capture"):
             return
         if self.status.is_enabled("block_input"):
@@ -2467,6 +2627,7 @@ class AppMainWindow(MainWindow):
 
     # 鼠标滚动事件
     def handle_mouse_wheel_event(self, event: QWheelEvent) -> None:
+        self.update_last_user_input_time()
         if not self.status.is_enabled("mouse_capture"):
             return
         if self.status.is_enabled("block_input"):
@@ -2557,6 +2718,7 @@ class AppMainWindow(MainWindow):
 
     # 处理键盘按下事件
     def handle_key_press_with_hid_code(self, hid_code: int) -> None:
+        self.update_last_user_input_time()
         # 指示器按键则更新指示器buffer
         self.update_keyboard_indicator_buffer_with_hid_code(hid_code)
         # 更新键盘buffer
@@ -2574,6 +2736,7 @@ class AppMainWindow(MainWindow):
 
     # 处理键盘松开事件
     def handle_key_release_with_hid_code(self, hid_code: int) -> None:
+        self.update_last_user_input_time()
         if self.status.is_enabled("block_input"):
             return
         if self.status.is_enabled("pause_keyboard"):
